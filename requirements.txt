@@ -1,0 +1,3 @@
+requests
+cos-python-sdk-v5
+Pillow
