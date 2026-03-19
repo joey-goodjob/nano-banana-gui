@@ -358,6 +358,59 @@ class BananaApp:
         )
         res_combo.pack(side=tk.LEFT, padx=5)
 
+        # 第二行：腾讯云 COS 配置
+        cos_frame = ttk.LabelFrame(frame, text="腾讯云 COS 存储配置", padding=5)
+        cos_frame.pack(fill=tk.X, pady=(8, 0))
+
+        cos_row1 = ttk.Frame(cos_frame)
+        cos_row1.pack(fill=tk.X, pady=2)
+
+        ttk.Label(cos_row1, text="SecretId:").pack(side=tk.LEFT)
+        self.cos_id_var = tk.StringVar()
+        ttk.Entry(cos_row1, textvariable=self.cos_id_var, width=40).pack(
+            side=tk.LEFT, padx=(5, 15)
+        )
+
+        ttk.Label(cos_row1, text="SecretKey:").pack(side=tk.LEFT)
+        self.cos_key_var = tk.StringVar()
+        ttk.Entry(cos_row1, textvariable=self.cos_key_var, width=40, show="*").pack(
+            side=tk.LEFT, padx=5
+        )
+
+        cos_row2 = ttk.Frame(cos_frame)
+        cos_row2.pack(fill=tk.X, pady=2)
+
+        ttk.Label(cos_row2, text="地域(Region):").pack(side=tk.LEFT)
+        self.cos_region_var = tk.StringVar(value="ap-guangzhou")
+        cos_region_combo = ttk.Combobox(
+            cos_row2,
+            textvariable=self.cos_region_var,
+            values=[
+                "ap-beijing", "ap-shanghai", "ap-guangzhou",
+                "ap-chengdu", "ap-chongqing", "ap-nanjing",
+                "ap-hongkong", "ap-singapore",
+            ],
+            width=15,
+        )
+        cos_region_combo.pack(side=tk.LEFT, padx=(5, 15))
+
+        ttk.Label(cos_row2, text="Bucket:").pack(side=tk.LEFT)
+        self.cos_bucket_var = tk.StringVar()
+        ttk.Entry(cos_row2, textvariable=self.cos_bucket_var, width=30).pack(
+            side=tk.LEFT, padx=5
+        )
+        ttk.Label(cos_row2, text="(如: mybucket-1250000000)").pack(side=tk.LEFT)
+
+        cos_row3 = ttk.Frame(cos_frame)
+        cos_row3.pack(fill=tk.X, pady=2)
+
+        ttk.Label(cos_row3, text="上传路径前缀:").pack(side=tk.LEFT)
+        self.cos_upload_path_var = tk.StringVar()
+        ttk.Entry(cos_row3, textvariable=self.cos_upload_path_var, width=20).pack(
+            side=tk.LEFT, padx=5
+        )
+        ttk.Label(cos_row3, text="(可选，桶内的子目录)").pack(side=tk.LEFT)
+
         # 输出目录
         out_frame = ttk.LabelFrame(frame, text="输出目录", padding=5)
         out_frame.pack(fill=tk.X, pady=(8, 0))
