@@ -20,8 +20,8 @@ from qcloud_cos import CosConfig, CosS3Client
 # ========== 常量配置 ==========
 
 # 版本号和更新时间
-VERSION = "1.0.2"
-UPDATE_DATE = "2026.03.19"
+VERSION = "1.1.0"
+UPDATE_DATE = "2026.04.14"
 
 # 配置文件路径（和脚本同目录）
 CONFIG_FILE = Path(__file__).parent / "config.json"
@@ -338,18 +338,31 @@ class BananaApp:
         # 加载配置
         self.config = load_config()
 
-        # 构建界面
-        self._build_ui()
+        # 构建 Notebook + 两个 Tab
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        # Tab 1：组图模式（现有功能）
+        tab1 = ttk.Frame(self.notebook)
+        self.notebook.add(tab1, text="  组图模式  ")
+
+        # Tab 2：自由创作
+        from free_create_tab import FreeCreateTab
+        tab2 = ttk.Frame(self.notebook)
+        self.notebook.add(tab2, text="  自由创作  ")
+        self.free_create_tab = FreeCreateTab(tab2, self.root)
+
+        # 构建 Tab 1 的界面
+        self._build_ui(tab1)
 
         # 填充已保存的配置
         self._restore_config()
 
     # ---------- 界面构建 ----------
 
-    def _build_ui(self):
-        """构建整个 GUI 界面"""
-        # 主滚动区域
-        main_frame = ttk.Frame(self.root, padding=10)
+    def _build_ui(self, parent):
+        """构建组图模式 GUI 界面"""
+        main_frame = ttk.Frame(parent, padding=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
         # 使用 PanedWindow 分上下两部分：操作区 和 日志区
