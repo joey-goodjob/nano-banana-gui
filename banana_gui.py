@@ -19,6 +19,10 @@ from qcloud_cos import CosConfig, CosS3Client
 
 # ========== 常量配置 ==========
 
+# 版本号和更新时间
+VERSION = "1.0.2"
+UPDATE_DATE = "2026.03.19"
+
 # 配置文件路径（和脚本同目录）
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
@@ -31,6 +35,13 @@ NANO_TASK_STATUS_URL = "https://api.kie.ai/api/v1/jobs/recordInfo"
 
 # 轮询间隔（秒）
 POLL_INTERVAL_SEC = 3
+
+# API 请求超时和重试
+API_CONNECT_TIMEOUT_SEC = 10
+API_READ_TIMEOUT_SEC = 60
+CREATE_TASK_MAX_RETRIES = 3
+POLL_STATUS_MAX_RETRIES = 3
+REQUEST_RETRY_DELAY_SEC = 2
 
 # 各分辨率超时时间（秒）
 TIMEOUT_BY_RESOLUTION = {
@@ -82,13 +93,13 @@ def load_config():
     """从 JSON 文件加载配置"""
     defaults = {
         "nano_api_key": "",
-        "cos_secret_id": "",
-        "cos_secret_key": "",
+        "cos_secret_id": "AKIDgDYigS2O3eBiHwSlrmTxEJBnJdkex88u",
+        "cos_secret_key": "eHoEbqvpW0ISPAE9tY3MRM9xfRAjFi4J",
         "cos_region": "ap-guangzhou",
-        "cos_bucket": "",
+        "cos_bucket": "liangzai-1373119036",
         "cos_upload_path": "",
         "resolution": "2K",
-        "output_dir": str(Path(__file__).parent / "输出"),
+        "output_dir": str(OUTPUT_DIR),
     }
     if CONFIG_FILE.exists():
         try:
@@ -184,9 +195,35 @@ def create_nano_task(api_key, prompt, image_urls, resolution):
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    resp = requests.post(NANO_CREATE_TASK_URL, json=payload, headers=headers, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+
+    last_error = None
+    for attempt in range(1, CREATE_TASK_MAX_RETRIES + 1):
+        try:
+            resp = requests.post(
+                NANO_CREATE_TASK_URL,
+                json=payload,
+                headers=headers,
+                timeout=(API_CONNECT_TIMEOUT_SEC, API_READ_TIMEOUT_SEC),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except requests.exceptions.Timeout as exc:
+            last_error = exc
+            if attempt == CREATE_TASK_MAX_RETRIES:
+                raise RuntimeError(
+                    f"创建任务请求超时，已重试 {CREATE_TASK_MAX_RETRIES} 次"
+                ) from exc
+            time.sleep(REQUEST_RETRY_DELAY_SEC)
+        except requests.exceptions.RequestException as exc:
+            last_error = exc
+            if attempt == CREATE_TASK_MAX_RETRIES:
+                raise RuntimeError(
+                    f"创建任务请求失败，已重试 {CREATE_TASK_MAX_RETRIES} 次: {exc}"
+                ) from exc
+            time.sleep(REQUEST_RETRY_DELAY_SEC)
+    else:
+        raise RuntimeError(f"创建任务请求失败: {last_error}")
 
     if data.get("code") != 200 or not data.get("data", {}).get("taskId"):
         raise RuntimeError(f"创建任务失败: {data.get('msg', '未知错误')}")
@@ -199,20 +236,46 @@ def poll_nano_task(api_key, task_id, timeout_sec, cancel_flag, log_callback):
     headers = {"Authorization": f"Bearer {api_key}"}
     start_time = time.time()
     attempt = 0
+    consecutive_errors = 0
 
     while time.time() - start_time < timeout_sec:
         if cancel_flag():
             raise RuntimeError("已取消")
 
+        try:
+            resp = requests.get(
+                NANO_TASK_STATUS_URL,
+                params={"taskId": task_id},
+                headers=headers,
+                timeout=(API_CONNECT_TIMEOUT_SEC, API_READ_TIMEOUT_SEC),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            consecutive_errors = 0
+        except requests.exceptions.Timeout:
+            consecutive_errors += 1
+            log_callback(
+                f"  查询超时，正在重试 ({consecutive_errors}/{POLL_STATUS_MAX_RETRIES})"
+            )
+            if consecutive_errors >= POLL_STATUS_MAX_RETRIES:
+                raise RuntimeError(
+                    f"查询任务状态连续超时 {POLL_STATUS_MAX_RETRIES} 次"
+                )
+            time.sleep(REQUEST_RETRY_DELAY_SEC)
+            continue
+        except requests.exceptions.RequestException as exc:
+            consecutive_errors += 1
+            log_callback(
+                f"  查询失败，正在重试 ({consecutive_errors}/{POLL_STATUS_MAX_RETRIES}): {exc}"
+            )
+            if consecutive_errors >= POLL_STATUS_MAX_RETRIES:
+                raise RuntimeError(
+                    f"查询任务状态连续失败 {POLL_STATUS_MAX_RETRIES} 次: {exc}"
+                ) from exc
+            time.sleep(REQUEST_RETRY_DELAY_SEC)
+            continue
+
         attempt += 1
-        resp = requests.get(
-            NANO_TASK_STATUS_URL,
-            params={"taskId": task_id},
-            headers=headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
 
         if data.get("code") != 200 or not data.get("data"):
             raise RuntimeError(f"查询任务状态失败: {data.get('msg', '未知错误')}")
@@ -260,7 +323,7 @@ def build_prompt(has_character, user_prompt):
 class BananaApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Nano Banana 2 图片生成工具")
+        self.root.title(f"Nano Banana 2 图片生成工具 v{VERSION} ({UPDATE_DATE})")
         self.root.geometry("1000x820")
         self.root.minsize(900, 750)
 
