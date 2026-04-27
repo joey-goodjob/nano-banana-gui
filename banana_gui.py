@@ -32,6 +32,12 @@ OUTPUT_DIR = Path(__file__).parent / "输出"
 # Nano Banana 2 API 端点
 NANO_CREATE_TASK_URL = "https://api.kie.ai/api/v1/jobs/createTask"
 NANO_TASK_STATUS_URL = "https://api.kie.ai/api/v1/jobs/recordInfo"
+GPT_IMAGE_2_TEXT_MODEL = "gpt-image-2-text-to-image"
+GPT_IMAGE_2_IMAGE_MODEL = "gpt-image-2-image-to-image"
+MODEL_NANO = "Nano Banana 2"
+MODEL_GPT_IMAGE_2 = "GPT Image 2"
+GPT_IMAGE_2_ASPECT_RATIOS = ["auto", "1:1", "9:16", "16:9", "4:3", "3:4"]
+MAX_GPT_IMAGE_2_INPUTS = 16
 
 # 轮询间隔（秒）
 POLL_INTERVAL_SEC = 3
@@ -93,12 +99,16 @@ def load_config():
     """从 JSON 文件加载配置"""
     defaults = {
         "nano_api_key": "",
+        "gptimage2_api_key": "",
         "cos_secret_id": "AKIDgDYigS2O3eBiHwSlrmTxEJBnJdkex88u",
         "cos_secret_key": "eHoEbqvpW0ISPAE9tY3MRM9xfRAjFi4J",
         "cos_region": "ap-guangzhou",
         "cos_bucket": "liangzai-1373119036",
         "cos_upload_path": "",
         "resolution": "2K",
+        "group_mode_model": MODEL_NANO,
+        "free_create_model": MODEL_NANO,
+        "gptimage2_aspect_ratio": "auto",
         "output_dir": str(OUTPUT_DIR),
     }
     if CONFIG_FILE.exists():
@@ -118,6 +128,13 @@ def save_config(config_dict):
             json.dump(config_dict, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+def merge_and_save_config(config_updates):
+    """合并配置后保存，避免不同页面相互覆盖字段。"""
+    current = load_config()
+    current.update(config_updates)
+    save_config(current)
 
 
 # ========== 腾讯云 COS 上传模块 ==========
@@ -231,6 +248,60 @@ def create_nano_task(api_key, prompt, image_urls, resolution):
     return data["data"]["taskId"]
 
 
+def create_gpt_image_2_task(api_key, prompt, image_urls, resolution, aspect_ratio):
+    """创建 GPT Image 2 任务，按是否有参考图自动切换模型。"""
+    use_image_to_image = bool(image_urls)
+    payload = {
+        "model": GPT_IMAGE_2_IMAGE_MODEL if use_image_to_image else GPT_IMAGE_2_TEXT_MODEL,
+        "input": {
+            "prompt": prompt,
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+        },
+    }
+    if use_image_to_image:
+        payload["input"]["input_urls"] = image_urls
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    last_error = None
+    for attempt in range(1, CREATE_TASK_MAX_RETRIES + 1):
+        try:
+            resp = requests.post(
+                NANO_CREATE_TASK_URL,
+                json=payload,
+                headers=headers,
+                timeout=(API_CONNECT_TIMEOUT_SEC, API_READ_TIMEOUT_SEC),
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except requests.exceptions.Timeout as exc:
+            last_error = exc
+            if attempt == CREATE_TASK_MAX_RETRIES:
+                raise RuntimeError(
+                    f"创建 GPT Image 2 任务请求超时，已重试 {CREATE_TASK_MAX_RETRIES} 次"
+                ) from exc
+            time.sleep(REQUEST_RETRY_DELAY_SEC)
+        except requests.exceptions.RequestException as exc:
+            last_error = exc
+            if attempt == CREATE_TASK_MAX_RETRIES:
+                raise RuntimeError(
+                    f"创建 GPT Image 2 任务请求失败，已重试 {CREATE_TASK_MAX_RETRIES} 次: {exc}"
+                ) from exc
+            time.sleep(REQUEST_RETRY_DELAY_SEC)
+    else:
+        raise RuntimeError(f"创建 GPT Image 2 任务请求失败: {last_error}")
+
+    if data.get("code") != 200 or not data.get("data", {}).get("taskId"):
+        raise RuntimeError(f"创建 GPT Image 2 任务失败: {data.get('msg', '未知错误')}")
+
+    return data["data"]["taskId"]
+
+
 def poll_nano_task(api_key, task_id, timeout_sec, cancel_flag, log_callback):
     """轮询任务状态，返回结果 URL"""
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -300,12 +371,37 @@ def poll_nano_task(api_key, task_id, timeout_sec, cancel_flag, log_callback):
             raise RuntimeError("任务成功但无法解析结果 URL")
 
         if state == "fail":
+            fail_code = task_data.get("failCode")
             fail_msg = task_data.get("failMsg", "未知原因")
+            model_name = task_data.get("model", "")
+            param_str = task_data.get("param", "")
+            if fail_code:
+                log_callback(f"  失败代码: {fail_code}")
+            if model_name:
+                log_callback(f"  失败模型: {model_name}")
+            if param_str:
+                log_callback(f"  失败参数: {param_str}")
             raise RuntimeError(f"任务失败: {fail_msg}")
 
         time.sleep(POLL_INTERVAL_SEC)
 
     raise RuntimeError(f"轮询超时（{timeout_sec}秒）")
+
+
+def poll_gpt_image_2_task(api_key, task_id, timeout_sec, cancel_flag, log_callback):
+    """轮询 GPT Image 2 任务状态。"""
+    return poll_nano_task(api_key, task_id, timeout_sec, cancel_flag, log_callback)
+
+
+def validate_gpt_image_2_request(resolution, aspect_ratio, image_count):
+    """校验 GPT Image 2 参数，返回错误信息或 None。"""
+    if aspect_ratio == "auto" and resolution != "1K":
+        return "GPT Image 2 在比例为 auto 时只支持 1K 分辨率"
+    if aspect_ratio == "1:1" and resolution == "4K":
+        return "GPT Image 2 的 1:1 比例不支持 4K 分辨率"
+    if image_count > MAX_GPT_IMAGE_2_INPUTS:
+        return f"GPT Image 2 最多支持 {MAX_GPT_IMAGE_2_INPUTS} 张参考图"
+    return None
 
 
 # ========== 提示词构建 ==========
@@ -413,15 +509,20 @@ class BananaApp:
         frame = ttk.LabelFrame(parent, text="配置", padding=10)
         frame.pack(fill=tk.X, pady=(0, 10))
 
-        # 第一行：Nano API Key + 分辨率
         row1 = ttk.Frame(frame)
         row1.pack(fill=tk.X, pady=2)
 
-        ttk.Label(row1, text="Nano API Key:").pack(side=tk.LEFT)
-        self.nano_key_var = tk.StringVar()
-        ttk.Entry(row1, textvariable=self.nano_key_var, width=50, show="*").pack(
-            side=tk.LEFT, padx=(5, 20)
+        ttk.Label(row1, text="模型:").pack(side=tk.LEFT)
+        self.model_var = tk.StringVar(value=MODEL_NANO)
+        self.model_combo = ttk.Combobox(
+            row1,
+            textvariable=self.model_var,
+            values=[MODEL_NANO, MODEL_GPT_IMAGE_2],
+            width=16,
+            state="readonly",
         )
+        self.model_combo.pack(side=tk.LEFT, padx=(5, 20))
+        self.model_combo.bind("<<ComboboxSelected>>", self._on_model_changed)
 
         ttk.Label(row1, text="分辨率:").pack(side=tk.LEFT)
         self.resolution_var = tk.StringVar(value="2K")
@@ -432,9 +533,35 @@ class BananaApp:
             width=5,
             state="readonly",
         )
-        res_combo.pack(side=tk.LEFT, padx=5)
+        res_combo.pack(side=tk.LEFT, padx=(5, 20))
 
-        # 第二行：腾讯云 COS 配置
+        self.aspect_ratio_frame = ttk.Frame(row1)
+        ttk.Label(self.aspect_ratio_frame, text="比例:").pack(side=tk.LEFT)
+        self.aspect_ratio_var = tk.StringVar(value="auto")
+        self.aspect_ratio_combo = ttk.Combobox(
+            self.aspect_ratio_frame,
+            textvariable=self.aspect_ratio_var,
+            values=GPT_IMAGE_2_ASPECT_RATIOS,
+            width=7,
+            state="readonly",
+        )
+        self.aspect_ratio_combo.pack(side=tk.LEFT, padx=5)
+
+        row2 = ttk.Frame(frame)
+        row2.pack(fill=tk.X, pady=2)
+
+        ttk.Label(row2, text="Nano API Key:").pack(side=tk.LEFT)
+        self.nano_key_var = tk.StringVar()
+        ttk.Entry(row2, textvariable=self.nano_key_var, width=38, show="*").pack(
+            side=tk.LEFT, padx=(5, 15)
+        )
+
+        ttk.Label(row2, text="GPT Image Key:").pack(side=tk.LEFT)
+        self.gptimage2_key_var = tk.StringVar()
+        ttk.Entry(row2, textvariable=self.gptimage2_key_var, width=38, show="*").pack(
+            side=tk.LEFT, padx=5
+        )
+
         cos_frame = ttk.LabelFrame(frame, text="腾讯云 COS 存储配置", padding=5)
         cos_frame.pack(fill=tk.X, pady=(8, 0))
 
@@ -487,7 +614,6 @@ class BananaApp:
         )
         ttk.Label(cos_row3, text="(可选，桶内的子目录)").pack(side=tk.LEFT)
 
-        # 输出目录
         out_frame = ttk.LabelFrame(frame, text="输出目录", padding=5)
         out_frame.pack(fill=tk.X, pady=(8, 0))
 
@@ -500,7 +626,6 @@ class BananaApp:
         )
         ttk.Button(out_row, text="浏览...", command=self._select_output_dir).pack(side=tk.LEFT)
 
-        # 保存配置按钮
         btn_row = ttk.Frame(frame)
         btn_row.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(btn_row, text="保存配置", command=self._save_config).pack(side=tk.RIGHT)
@@ -655,42 +780,62 @@ class BananaApp:
 
     def _restore_config(self):
         """从加载的配置恢复界面"""
+        self.model_var.set(self.config.get("group_mode_model", MODEL_NANO))
         self.nano_key_var.set(self.config.get("nano_api_key", ""))
+        self.gptimage2_key_var.set(self.config.get("gptimage2_api_key", ""))
         self.cos_id_var.set(self.config.get("cos_secret_id", ""))
         self.cos_key_var.set(self.config.get("cos_secret_key", ""))
         self.cos_region_var.set(self.config.get("cos_region", "ap-guangzhou"))
         self.cos_bucket_var.set(self.config.get("cos_bucket", ""))
         self.cos_upload_path_var.set(self.config.get("cos_upload_path", ""))
         self.resolution_var.set(self.config.get("resolution", "2K"))
+        self.aspect_ratio_var.set(self.config.get("gptimage2_aspect_ratio", "auto"))
         self.output_dir_var.set(self.config.get("output_dir", str(OUTPUT_DIR)))
+        self._update_model_visibility()
 
     def _save_config(self):
         """保存当前界面配置到文件"""
         config = {
+            "group_mode_model": self.model_var.get(),
             "nano_api_key": self.nano_key_var.get().strip(),
+            "gptimage2_api_key": self.gptimage2_key_var.get().strip(),
             "cos_secret_id": self.cos_id_var.get().strip(),
             "cos_secret_key": self.cos_key_var.get().strip(),
             "cos_region": self.cos_region_var.get().strip(),
             "cos_bucket": self.cos_bucket_var.get().strip(),
             "cos_upload_path": self.cos_upload_path_var.get().strip(),
             "resolution": self.resolution_var.get(),
+            "gptimage2_aspect_ratio": self.aspect_ratio_var.get(),
             "output_dir": self.output_dir_var.get().strip(),
         }
-        save_config(config)
+        merge_and_save_config(config)
+        self.config.update(config)
         self._log("success", "配置已保存")
 
     def _get_current_config(self):
         """获取当前界面上的配置值"""
         return {
+            "selected_model": self.model_var.get(),
             "nano_api_key": self.nano_key_var.get().strip(),
+            "gptimage2_api_key": self.gptimage2_key_var.get().strip(),
             "cos_secret_id": self.cos_id_var.get().strip(),
             "cos_secret_key": self.cos_key_var.get().strip(),
             "cos_region": self.cos_region_var.get().strip(),
             "cos_bucket": self.cos_bucket_var.get().strip(),
             "cos_upload_path": self.cos_upload_path_var.get().strip(),
             "resolution": self.resolution_var.get(),
+            "gptimage2_aspect_ratio": self.aspect_ratio_var.get(),
             "output_dir": self.output_dir_var.get().strip(),
         }
+
+    def _on_model_changed(self, _event=None):
+        self._update_model_visibility()
+
+    def _update_model_visibility(self):
+        if self.model_var.get() == MODEL_GPT_IMAGE_2:
+            self.aspect_ratio_frame.pack(side=tk.LEFT)
+        else:
+            self.aspect_ratio_frame.pack_forget()
 
     def _select_output_dir(self):
         """弹出文件夹选择对话框"""
@@ -834,8 +979,21 @@ class BananaApp:
         """校验输入是否完整"""
         cfg = self._get_current_config()
 
-        if not cfg["nano_api_key"]:
-            return "请输入 Nano API Key"
+        if cfg["selected_model"] == MODEL_NANO:
+            if not cfg["nano_api_key"]:
+                return "请输入 Nano API Key"
+        else:
+            if not cfg["gptimage2_api_key"]:
+                return "请输入 GPT Image 2 API Key"
+            if not self.prompt_text.get("1.0", tk.END).strip():
+                return "请输入提示词"
+            error = validate_gpt_image_2_request(
+                cfg["resolution"],
+                cfg["gptimage2_aspect_ratio"],
+                2 if self.character_image_path else 1,
+            )
+            if error:
+                return error
         if not self.scene_image_paths:
             return "请至少添加一张场景图"
         return None
@@ -850,6 +1008,7 @@ class BananaApp:
         self.is_generating = True
         self.cancel_requested = False
         self.results.clear()
+        self.download_btn.config(state=tk.DISABLED)
         self.generate_btn.config(state=tk.DISABLED)
         self.cancel_btn.config(state=tk.NORMAL)
         self._update_progress(0)
@@ -875,8 +1034,14 @@ class BananaApp:
     def _generate_worker(self):
         """子线程：执行生成流程"""
         cfg = self._get_current_config()
-        api_key = cfg["nano_api_key"]
+        selected_model = cfg["selected_model"]
+        api_key = (
+            cfg["nano_api_key"]
+            if selected_model == MODEL_NANO
+            else cfg["gptimage2_api_key"]
+        )
         resolution = cfg["resolution"]
+        aspect_ratio = cfg["gptimage2_aspect_ratio"]
         user_prompt = self.prompt_text.get("1.0", tk.END).strip()
         has_character = self.character_image_path is not None
         scene_count = len(self.scene_image_paths)
@@ -891,7 +1056,15 @@ class BananaApp:
         output_dir = Path(base_output) / timestamp
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        self._log("info", f"开始生成任务: {scene_count} 张场景图, 分辨率 {resolution}")
+        self._log(
+            "info",
+            f"开始生成任务: {scene_count} 张场景图, 模型 {selected_model}, 分辨率 {resolution}",
+        )
+        if selected_model == MODEL_GPT_IMAGE_2:
+            self._log(
+                "info",
+                f"GPT Image 2 参数: aspect_ratio={aspect_ratio}, 单任务参考图数量={'2' if has_character else '1'}",
+            )
         self._log("info", f"并发数: {concurrency}, 超时: {timeout_sec}秒")
         self._log("info", f"输出目录: {output_dir}")
         self._update_status(f"正在准备... (0/{scene_count})")
@@ -940,23 +1113,41 @@ class BananaApp:
                 )
                 self._log("success", f"[场景 {idx}] 场景图上传完成 ({w}x{h})")
 
-                # 构建提示词
-                prompt = build_prompt(has_character, user_prompt)
+                if selected_model == MODEL_NANO:
+                    prompt = build_prompt(has_character, user_prompt)
+                else:
+                    prompt = user_prompt
 
-                # 组装图片 URL
                 image_urls = []
                 if character_url:
                     image_urls.append(character_url)
                 image_urls.append(scene_url)
 
-                # 创建任务
                 self._log("info", f"[场景 {idx}] 创建生成任务...")
-                task_id = create_nano_task(api_key, prompt, image_urls, resolution)
+                if selected_model == MODEL_GPT_IMAGE_2:
+                    self._log(
+                        "info",
+                        f"[场景 {idx}] GPT Image 2 请求: aspect_ratio={aspect_ratio}, reference_count={len(image_urls)}",
+                    )
+                if selected_model == MODEL_NANO:
+                    task_id = create_nano_task(api_key, prompt, image_urls, resolution)
+                else:
+                    task_id = create_gpt_image_2_task(
+                        api_key,
+                        prompt,
+                        image_urls,
+                        resolution,
+                        aspect_ratio,
+                    )
                 self._log("info", f"[场景 {idx}] 任务已创建: {task_id}")
 
-                # 轮询结果
                 self._log("info", f"[场景 {idx}] 等待生成结果...")
-                result_url = poll_nano_task(
+                poll_func = (
+                    poll_nano_task
+                    if selected_model == MODEL_NANO
+                    else poll_gpt_image_2_task
+                )
+                result_url = poll_func(
                     api_key,
                     task_id,
                     timeout_sec,

@@ -1,5 +1,5 @@
 """
-自由创作 Tab - 直接调用 Nano Banana 2 API，不附加任何内置提示词
+自由创作 Tab - 可在 Nano Banana 2 与 GPT Image 2 之间切换
 """
 
 import os
@@ -14,14 +14,21 @@ import requests
 from PIL import Image, ImageTk
 
 from banana_gui import (
+    GPT_IMAGE_2_ASPECT_RATIOS,
+    MAX_GPT_IMAGE_2_INPUTS,
+    MODEL_GPT_IMAGE_2,
+    MODEL_NANO,
     OUTPUT_DIR,
     TIMEOUT_BY_RESOLUTION,
     create_cos_client,
+    create_gpt_image_2_task,
     create_nano_task,
     load_config,
+    merge_and_save_config,
+    poll_gpt_image_2_task,
     poll_nano_task,
-    save_config,
     upload_to_cos,
+    validate_gpt_image_2_request,
 )
 
 
@@ -91,11 +98,17 @@ class FreeCreateTab:
         row1 = ttk.Frame(frame)
         row1.pack(fill=tk.X, pady=2)
 
-        ttk.Label(row1, text="Nano API Key:").pack(side=tk.LEFT)
-        self.nano_key_var = tk.StringVar()
-        ttk.Entry(row1, textvariable=self.nano_key_var, width=50, show="*").pack(
-            side=tk.LEFT, padx=(5, 20)
+        ttk.Label(row1, text="模型:").pack(side=tk.LEFT)
+        self.model_var = tk.StringVar(value=MODEL_NANO)
+        self.model_combo = ttk.Combobox(
+            row1,
+            textvariable=self.model_var,
+            values=[MODEL_NANO, MODEL_GPT_IMAGE_2],
+            width=16,
+            state="readonly",
         )
+        self.model_combo.pack(side=tk.LEFT, padx=(5, 20))
+        self.model_combo.bind("<<ComboboxSelected>>", self._on_model_changed)
 
         ttk.Label(row1, text="分辨率:").pack(side=tk.LEFT)
         self.resolution_var = tk.StringVar(value="2K")
@@ -106,7 +119,34 @@ class FreeCreateTab:
             width=5,
             state="readonly",
         )
-        res_combo.pack(side=tk.LEFT, padx=5)
+        res_combo.pack(side=tk.LEFT, padx=(5, 20))
+
+        self.aspect_ratio_frame = ttk.Frame(row1)
+        ttk.Label(self.aspect_ratio_frame, text="比例:").pack(side=tk.LEFT)
+        self.aspect_ratio_var = tk.StringVar(value="auto")
+        self.aspect_ratio_combo = ttk.Combobox(
+            self.aspect_ratio_frame,
+            textvariable=self.aspect_ratio_var,
+            values=GPT_IMAGE_2_ASPECT_RATIOS,
+            width=7,
+            state="readonly",
+        )
+        self.aspect_ratio_combo.pack(side=tk.LEFT, padx=5)
+
+        row2 = ttk.Frame(frame)
+        row2.pack(fill=tk.X, pady=2)
+
+        ttk.Label(row2, text="Nano API Key:").pack(side=tk.LEFT)
+        self.nano_key_var = tk.StringVar()
+        ttk.Entry(row2, textvariable=self.nano_key_var, width=38, show="*").pack(
+            side=tk.LEFT, padx=(5, 15)
+        )
+
+        ttk.Label(row2, text="GPT Image Key:").pack(side=tk.LEFT)
+        self.gptimage2_key_var = tk.StringVar()
+        ttk.Entry(row2, textvariable=self.gptimage2_key_var, width=38, show="*").pack(
+            side=tk.LEFT, padx=5
+        )
 
         cos_frame = ttk.LabelFrame(frame, text="腾讯云 COS 存储配置", padding=5)
         cos_frame.pack(fill=tk.X, pady=(8, 0))
@@ -135,9 +175,14 @@ class FreeCreateTab:
             cos_row2,
             textvariable=self.cos_region_var,
             values=[
-                "ap-beijing", "ap-shanghai", "ap-guangzhou",
-                "ap-chengdu", "ap-chongqing", "ap-nanjing",
-                "ap-hongkong", "ap-singapore",
+                "ap-beijing",
+                "ap-shanghai",
+                "ap-guangzhou",
+                "ap-chengdu",
+                "ap-chongqing",
+                "ap-nanjing",
+                "ap-hongkong",
+                "ap-singapore",
             ],
             width=15,
         ).pack(side=tk.LEFT, padx=(5, 15))
@@ -182,16 +227,19 @@ class FreeCreateTab:
         prompt_frame = ttk.Frame(frame)
         prompt_frame.pack(fill=tk.X, pady=(0, 8))
 
-        ttk.Label(prompt_frame, text="提示词（直接发送给模型，不附加任何内置提示词）:").pack(anchor=tk.W)
+        ttk.Label(
+            prompt_frame,
+            text="提示词（直接发送给当前模型，不附加任何内置提示词）:",
+        ).pack(anchor=tk.W)
         self.prompt_text = tk.Text(prompt_frame, height=6, wrap=tk.WORD)
         self.prompt_text.pack(fill=tk.X, pady=(4, 0))
 
-        hint_label = ttk.Label(
+        self.prompt_hint_label = ttk.Label(
             prompt_frame,
-            text="提示：你输入的内容会原封不动发送给 Banana 模型，请自行编写完整的提示词",
+            text="提示：你输入的内容会原样发送给所选模型，请自行编写完整提示词",
             foreground="gray",
         )
-        hint_label.pack(anchor=tk.W)
+        self.prompt_hint_label.pack(anchor=tk.W)
 
         ref_frame = ttk.LabelFrame(frame, text="参考图（可选，0~N 张）", padding=5)
         ref_frame.pack(fill=tk.X)
@@ -287,40 +335,66 @@ class FreeCreateTab:
     # ---------- 配置管理 ----------
 
     def _restore_config(self):
+        self.model_var.set(self.config.get("free_create_model", MODEL_NANO))
         self.nano_key_var.set(self.config.get("nano_api_key", ""))
+        self.gptimage2_key_var.set(self.config.get("gptimage2_api_key", ""))
         self.cos_id_var.set(self.config.get("cos_secret_id", ""))
         self.cos_key_var.set(self.config.get("cos_secret_key", ""))
         self.cos_region_var.set(self.config.get("cos_region", "ap-guangzhou"))
         self.cos_bucket_var.set(self.config.get("cos_bucket", ""))
         self.cos_upload_path_var.set(self.config.get("cos_upload_path", ""))
         self.resolution_var.set(self.config.get("resolution", "2K"))
+        self.aspect_ratio_var.set(self.config.get("gptimage2_aspect_ratio", "auto"))
         self.output_dir_var.set(self.config.get("output_dir", str(OUTPUT_DIR)))
+        self._update_model_visibility()
 
     def _save_config(self):
         config = {
+            "free_create_model": self.model_var.get(),
             "nano_api_key": self.nano_key_var.get().strip(),
+            "gptimage2_api_key": self.gptimage2_key_var.get().strip(),
             "cos_secret_id": self.cos_id_var.get().strip(),
             "cos_secret_key": self.cos_key_var.get().strip(),
             "cos_region": self.cos_region_var.get().strip(),
             "cos_bucket": self.cos_bucket_var.get().strip(),
             "cos_upload_path": self.cos_upload_path_var.get().strip(),
             "resolution": self.resolution_var.get(),
+            "gptimage2_aspect_ratio": self.aspect_ratio_var.get(),
             "output_dir": self.output_dir_var.get().strip(),
         }
-        save_config(config)
+        merge_and_save_config(config)
+        self.config.update(config)
         self._log("success", "配置已保存")
 
     def _get_current_config(self):
         return {
+            "selected_model": self.model_var.get(),
             "nano_api_key": self.nano_key_var.get().strip(),
+            "gptimage2_api_key": self.gptimage2_key_var.get().strip(),
             "cos_secret_id": self.cos_id_var.get().strip(),
             "cos_secret_key": self.cos_key_var.get().strip(),
             "cos_region": self.cos_region_var.get().strip(),
             "cos_bucket": self.cos_bucket_var.get().strip(),
             "cos_upload_path": self.cos_upload_path_var.get().strip(),
             "resolution": self.resolution_var.get(),
+            "gptimage2_aspect_ratio": self.aspect_ratio_var.get(),
             "output_dir": self.output_dir_var.get().strip(),
         }
+
+    def _on_model_changed(self, _event=None):
+        self._update_model_visibility()
+
+    def _update_model_visibility(self):
+        is_gpt = self.model_var.get() == MODEL_GPT_IMAGE_2
+        if is_gpt:
+            self.aspect_ratio_frame.pack(side=tk.LEFT)
+        else:
+            self.aspect_ratio_frame.pack_forget()
+
+        hint = "提示：你输入的内容会原样发送给所选模型，请自行编写完整提示词"
+        if is_gpt:
+            hint = "提示：GPT Image 2 不附加任何内置提示词，也不强制同一人物"
+        self.prompt_hint_label.config(text=hint)
 
     def _select_output_dir(self):
         current = self.output_dir_var.get().strip()
@@ -328,7 +402,7 @@ class FreeCreateTab:
         folder = filedialog.askdirectory(title="选择输出目录", initialdir=initial_dir)
         if folder:
             self.output_dir_var.set(folder)
-            self._log("info", f"输出目录已更改: {folder}")
+            self._log("info", f"输出目录已更新: {folder}")
 
     # ---------- 参考图选择 ----------
 
@@ -365,8 +439,8 @@ class FreeCreateTab:
             widget.destroy()
 
         keys_to_remove = [k for k in self.preview_images if k.startswith("ref_")]
-        for k in keys_to_remove:
-            del self.preview_images[k]
+        for key in keys_to_remove:
+            del self.preview_images[key]
 
         for i, path in enumerate(self.reference_image_paths):
             try:
@@ -382,11 +456,8 @@ class FreeCreateTab:
                 label = ttk.Label(item_frame, image=photo)
                 label.pack()
 
-                num_label = ttk.Label(item_frame, text=f"#{i + 1}", foreground="gray")
-                num_label.pack()
-
-                idx = i
-                label.bind("<Button-3>", lambda e, idx=idx: self._remove_reference(idx))
+                ttk.Label(item_frame, text=f"#{i + 1}", foreground="gray").pack()
+                label.bind("<Button-3>", lambda e, idx=i: self._remove_reference(idx))
             except Exception:
                 pass
 
@@ -394,12 +465,11 @@ class FreeCreateTab:
 
     def _log(self, level, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
-        tag = level
 
         def _append():
             self.log_text.config(state=tk.NORMAL)
             self.log_text.insert(tk.END, f"[{timestamp}] ", "info")
-            self.log_text.insert(tk.END, f"{message}\n", tag)
+            self.log_text.insert(tk.END, f"{message}\n", level)
             self.log_text.see(tk.END)
             self.log_text.config(state=tk.DISABLED)
 
@@ -413,20 +483,43 @@ class FreeCreateTab:
 
     # ---------- 生成逻辑 ----------
 
-    def _on_generate(self):
+    def _validate_inputs(self):
         cfg = self._get_current_config()
-        if not cfg["nano_api_key"]:
-            messagebox.showwarning("校验失败", "请输入 Nano API Key")
-            return
+
+        selected_model = cfg["selected_model"]
+        if selected_model == MODEL_NANO:
+            if not cfg["nano_api_key"]:
+                return "请输入 Nano API Key"
+        else:
+            if not cfg["gptimage2_api_key"]:
+                return "请输入 GPT Image 2 API Key"
+            error = validate_gpt_image_2_request(
+                cfg["resolution"],
+                cfg["gptimage2_aspect_ratio"],
+                len(self.reference_image_paths),
+            )
+            if error:
+                return error
 
         prompt = self.prompt_text.get("1.0", tk.END).strip()
         if not prompt:
-            messagebox.showwarning("校验失败", "请输入提示词")
+            return "请输入提示词"
+
+        if len(self.reference_image_paths) > MAX_GPT_IMAGE_2_INPUTS:
+            return f"参考图最多只能添加 {MAX_GPT_IMAGE_2_INPUTS} 张"
+
+        return None
+
+    def _on_generate(self):
+        error = self._validate_inputs()
+        if error:
+            messagebox.showwarning("校验失败", error)
             return
 
         self.is_generating = True
         self.cancel_requested = False
         self.result_path = None
+        self.open_folder_btn.config(state=tk.DISABLED)
         self.generate_btn.config(state=tk.DISABLED)
         self.cancel_btn.config(state=tk.NORMAL)
         self._update_progress(0)
@@ -448,15 +541,19 @@ class FreeCreateTab:
 
     def _generate_worker(self):
         cfg = self._get_current_config()
-        api_key = cfg["nano_api_key"]
+        selected_model = cfg["selected_model"]
+        api_key = (
+            cfg["nano_api_key"]
+            if selected_model == MODEL_NANO
+            else cfg["gptimage2_api_key"]
+        )
         resolution = cfg["resolution"]
+        aspect_ratio = cfg["gptimage2_aspect_ratio"]
         prompt = self.prompt_text.get("1.0", tk.END).strip()
         timeout_sec = TIMEOUT_BY_RESOLUTION.get(resolution, 300)
 
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        base_output = cfg.get("output_dir", "").strip()
-        if not base_output:
-            base_output = str(OUTPUT_DIR)
+        base_output = cfg.get("output_dir", "").strip() or str(OUTPUT_DIR)
         output_dir = Path(base_output) / "free-create" / timestamp
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -484,24 +581,41 @@ class FreeCreateTab:
                     self._log("success", f"参考图 [{i + 1}] 上传完成 ({w}x{h})")
                     image_urls.append(url)
 
-            self._log("info", f"正在创建任务，分辨率: {resolution}")
+            self._log(
+                "info",
+                f"正在创建任务，模型: {selected_model}，分辨率: {resolution}",
+            )
+            if selected_model == MODEL_GPT_IMAGE_2:
+                self._log(
+                    "info",
+                    f"GPT Image 2 参数: aspect_ratio={aspect_ratio}, reference_count={len(image_urls)}",
+                )
             self._update_status("正在创建任务...")
             self._update_progress(20)
 
-            task_id = create_nano_task(api_key, prompt, image_urls, resolution)
+            if selected_model == MODEL_NANO:
+                task_id = create_nano_task(api_key, prompt, image_urls, resolution)
+                poll_func = poll_nano_task
+            else:
+                task_id = create_gpt_image_2_task(
+                    api_key,
+                    prompt,
+                    image_urls,
+                    resolution,
+                    aspect_ratio,
+                )
+                poll_func = poll_gpt_image_2_task
+
             self._log("info", f"任务已创建: {task_id}")
             self._update_status("等待生成结果...")
             self._update_progress(40)
 
-            def log_cb(msg):
-                self._log("info", msg)
-
-            result_url = poll_nano_task(
+            result_url = poll_func(
                 api_key,
                 task_id,
                 timeout_sec,
                 lambda: self.cancel_requested,
-                log_cb,
+                lambda msg: self._log("info", msg),
             )
 
             self._log("success", "生成成功!")
@@ -521,8 +635,8 @@ class FreeCreateTab:
             self.root.after(0, self._refresh_result)
             self.root.after(0, lambda: self.open_folder_btn.config(state=tk.NORMAL))
 
-        except Exception as e:
-            self._log("error", f"生成失败: {e}")
+        except Exception as exc:
+            self._log("error", f"生成失败: {exc}")
             self._update_status("生成失败")
 
         finally:
@@ -548,9 +662,7 @@ class FreeCreateTab:
 
             img_label = ttk.Label(self.result_frame, image=photo, cursor="hand2")
             img_label.pack(pady=4)
-
-            path = self.result_path
-            img_label.bind("<Button-1>", lambda e, p=path: self._preview_image(p))
+            img_label.bind("<Button-1>", lambda e, p=self.result_path: self._preview_image(p))
         except Exception:
             ttk.Label(self.result_frame, text="[加载失败]").pack()
 
@@ -588,8 +700,8 @@ class FreeCreateTab:
                 command=lambda: os.startfile(os.path.dirname(image_path)),
             ).pack(side=tk.RIGHT, padx=10)
 
-        except Exception as e:
-            ttk.Label(preview_win, text=f"无法加载图片: {e}").pack(expand=True)
+        except Exception as exc:
+            ttk.Label(preview_win, text=f"无法加载图片: {exc}").pack(expand=True)
 
         preview_win.bind("<Escape>", lambda e: preview_win.destroy())
 
