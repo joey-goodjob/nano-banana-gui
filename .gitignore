@@ -11,6 +11,7 @@ build/
 dist/
 输出/
 config.json
+.streamlit/secrets.toml
 
 .DS_Store
 Thumbs.db

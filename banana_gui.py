@@ -100,10 +100,10 @@ def load_config():
     defaults = {
         "nano_api_key": "",
         "gptimage2_api_key": "",
-        "cos_secret_id": "AKIDgDYigS2O3eBiHwSlrmTxEJBnJdkex88u",
-        "cos_secret_key": "eHoEbqvpW0ISPAE9tY3MRM9xfRAjFi4J",
+        "cos_secret_id": "",
+        "cos_secret_key": "",
         "cos_region": "ap-guangzhou",
-        "cos_bucket": "liangzai-1373119036",
+        "cos_bucket": "",
         "cos_upload_path": "",
         "resolution": "2K",
         "group_mode_model": MODEL_NANO,
@@ -415,6 +415,23 @@ def build_prompt(has_character, user_prompt):
 
 
 # ========== 主界面 ==========
+
+# Web 版和桌面版共用同一套服务函数，避免后续维护两份业务逻辑。
+from banana_services import (  # noqa: E402
+    build_prompt,
+    compress_image,
+    create_cos_client,
+    create_gpt_image_2_task,
+    create_nano_task,
+    load_config,
+    merge_and_save_config,
+    poll_gpt_image_2_task,
+    poll_nano_task,
+    save_config,
+    upload_to_cos,
+    validate_gpt_image_2_request,
+)
+
 
 class BananaApp:
     def __init__(self, root):
