@@ -2,3 +2,4 @@ requests
 cos-python-sdk-v5
 Pillow
 streamlit
+streamlit-local-storage

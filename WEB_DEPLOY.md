@@ -24,15 +24,11 @@ streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port 8501
 http://服务器公网IP:8501
 ```
 
-## 配置文件
+## 配置保存
 
-页面里保存的 API Key 和 COS 配置会写入服务器本地：
+Web 页面里的 API Key 和 COS 配置会保存到当前浏览器的 localStorage，不会写入服务器本地 `config.json`。
 
-```text
-config.json
-```
-
-这个文件已经在 `.gitignore` 中，不要提交到 Git 仓库。
+注意：如果换浏览器、清理浏览器缓存、使用无痕模式，配置需要重新填写。
 
 ## 当前版本边界
 

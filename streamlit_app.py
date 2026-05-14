@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import io
+import json
+import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
 
 import streamlit as st
+from streamlit_local_storage import LocalStorage
 
 from banana_services import (
     GPT_IMAGE_2_ASPECT_RATIOS,
@@ -14,10 +17,9 @@ from banana_services import (
     MODEL_NANO,
     OUTPUT_DIR,
     build_app_config,
+    default_config,
     generate_free_image,
     generate_group_images,
-    load_config,
-    merge_and_save_config,
     save_single_uploaded_file,
     save_uploaded_files,
 )
@@ -31,19 +33,21 @@ st.set_page_config(
 
 
 IMAGE_TYPES = ["jpg", "jpeg", "png", "webp"]
+BROWSER_CONFIG_KEY = "nano_banana_browser_config_v1"
 
 
 def main() -> None:
     _apply_style()
-    raw_config = load_config()
+    local_storage = LocalStorage(key="nano_banana_storage")
+    raw_config = _load_browser_config(local_storage)
 
     st.title("Nano Banana 图片生成工具")
 
     tabs = st.tabs(["组图生成", "自由创作"])
     with tabs[0]:
-        _render_group_tab(raw_config)
+        _render_group_tab(raw_config, local_storage)
     with tabs[1]:
-        _render_free_tab(raw_config)
+        _render_free_tab(raw_config, local_storage)
 
     with st.sidebar:
         st.subheader("服务器启动")
@@ -55,12 +59,12 @@ def main() -> None:
         st.caption("腾讯云安全组需要开放 8501 端口。")
 
 
-def _render_group_tab(raw_config: dict) -> None:
+def _render_group_tab(raw_config: dict, local_storage: LocalStorage) -> None:
     left, right = st.columns([0.95, 1.35], gap="large")
 
     with left:
         st.subheader("配置")
-        group_config = _render_config_panel(raw_config, "group")
+        group_config = _render_config_panel(raw_config, "group", local_storage)
 
     with right:
         st.subheader("输入")
@@ -126,12 +130,12 @@ def _render_group_tab(raw_config: dict) -> None:
     _render_result("group_result", "组图结果")
 
 
-def _render_free_tab(raw_config: dict) -> None:
+def _render_free_tab(raw_config: dict, local_storage: LocalStorage) -> None:
     left, right = st.columns([0.95, 1.35], gap="large")
 
     with left:
         st.subheader("配置")
-        free_config = _render_config_panel(raw_config, "free")
+        free_config = _render_config_panel(raw_config, "free", local_storage)
 
     with right:
         st.subheader("输入")
@@ -183,7 +187,11 @@ def _render_free_tab(raw_config: dict) -> None:
     _render_result("free_result", "自由创作结果")
 
 
-def _render_config_panel(raw_config: dict, mode: str) -> dict:
+def _render_config_panel(
+    raw_config: dict,
+    mode: str,
+    local_storage: LocalStorage,
+) -> dict:
     model_key = "group_mode_model" if mode == "group" else "free_create_model"
     form_key = f"{mode}_config_form"
     model_default = raw_config.get(model_key, MODEL_NANO)
@@ -275,10 +283,41 @@ def _render_config_panel(raw_config: dict, mode: str) -> dict:
     }
 
     if saved:
-        merge_and_save_config(config)
-        st.success("配置已保存到服务器本地 config.json")
+        merged_config = {**raw_config, **config}
+        _save_browser_config(local_storage, merged_config, mode)
+        st.session_state["browser_config"] = merged_config
+        st.success("配置已保存到当前浏览器缓存，不会写入服务器 config.json")
 
     return {**raw_config, **config}
+
+
+def _load_browser_config(local_storage: LocalStorage) -> dict:
+    config = default_config()
+    raw_value = local_storage.getItem(BROWSER_CONFIG_KEY)
+    if raw_value:
+        try:
+            if isinstance(raw_value, str):
+                browser_config = json.loads(raw_value)
+            else:
+                browser_config = raw_value
+            if isinstance(browser_config, dict):
+                config.update(browser_config)
+        except (TypeError, json.JSONDecodeError):
+            st.warning("浏览器缓存里的配置无法解析，请重新保存配置。")
+    st.session_state["browser_config"] = config
+    return config
+
+
+def _save_browser_config(
+    local_storage: LocalStorage,
+    config: dict,
+    mode: str,
+) -> None:
+    local_storage.setItem(
+        BROWSER_CONFIG_KEY,
+        json.dumps(config, ensure_ascii=False),
+        key=f"save_browser_config_{mode}_{time.time_ns()}",
+    )
 
 
 def _render_logs(session_key: str) -> None:

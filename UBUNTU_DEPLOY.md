@@ -100,12 +100,8 @@ bash scripts/update_ubuntu.sh
 bash scripts/deploy_ubuntu.sh
 ```
 
-## 6. 配置文件
+## 6. 配置保存
 
-网页里保存的 API Key 和 COS 配置会写入：
+Web 页面里的 API Key 和 COS 配置会保存到当前浏览器的 localStorage，不会写入服务器本地 `config.json`。
 
-```text
-config.json
-```
-
-这个文件不会提交到 Git。部署新版本时注意不要误删它。
+注意：如果换浏览器、清理浏览器缓存、使用无痕模式，配置需要重新填写。
