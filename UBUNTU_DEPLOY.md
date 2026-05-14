@@ -94,7 +94,20 @@ sudo systemctl stop nano-banana-gui
 bash scripts/update_ubuntu.sh
 ```
 
-如果服务器是 ZIP 上传部署的，重新上传新版代码后再执行：
+如果服务器连 GitHub 不稳定，先把本地生成的 `nano-banana-gui-deploy.zip` 上传到服务器：
+
+```text
+/opt/nano-banana-gui-deploy.zip
+```
+
+然后执行：
+
+```bash
+cd /opt/nano-banana-gui
+bash scripts/update_ubuntu_zip.sh /opt/nano-banana-gui-deploy.zip
+```
+
+如果服务器是 ZIP 上传首次部署，重新上传新版代码后也可以执行：
 
 ```bash
 bash scripts/deploy_ubuntu.sh

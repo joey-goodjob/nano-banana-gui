@@ -15,7 +15,13 @@ if [[ ! -x "$APP_DIR/.venv/bin/python" ]]; then
 fi
 
 echo "==> Pulling latest code..."
-git -C "$APP_DIR" pull --ff-only
+if ! git -C "$APP_DIR" pull --ff-only; then
+  echo
+  echo "Git update failed. If this VPS cannot reach GitHub reliably, upload"
+  echo "nano-banana-gui-deploy.zip to /opt and run:"
+  echo "  bash scripts/update_ubuntu_zip.sh /opt/nano-banana-gui-deploy.zip"
+  exit 1
+fi
 
 echo "==> Updating dependencies..."
 "$APP_DIR/.venv/bin/python" -m pip install -r "$APP_DIR/requirements.txt"
